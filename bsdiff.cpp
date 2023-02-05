@@ -28,6 +28,7 @@
 #include "bsdiff.h"
 
 #include <limits.h>
+#include <sais64.h>
 #include <string.h>
 
 #define MIN(x,y) (((x)<(y)) ? (x) : (y))
@@ -131,24 +132,24 @@ static void qsufsort(int64_t *I,int64_t *V,const uint8_t *old,int64_t oldsize)
 	for(i=0;i<oldsize+1;i++) I[V[i]]=i;
 }
 
-static int64_t matchlen(const uint8_t *old,int64_t oldsize,const uint8_t *new,int64_t newsize)
+static int64_t matchlen(const uint8_t *oldbytes,int64_t oldsize,const uint8_t *newbytes,int64_t newsize)
 {
 	int64_t i;
 
 	for(i=0;(i<oldsize)&&(i<newsize);i++)
-		if(old[i]!=new[i]) break;
+		if(oldbytes[i]!=newbytes[i]) break;
 
 	return i;
 }
 
-static int64_t search(const int64_t *I,const uint8_t *old,int64_t oldsize,
-		const uint8_t *new,int64_t newsize,int64_t st,int64_t en,int64_t *pos)
+static int64_t search(const int64_t *I,const uint8_t *oldbytes,int64_t oldsize,
+		const uint8_t *newbytes,int64_t newsize,int64_t st,int64_t en,int64_t *pos)
 {
 	int64_t x,y;
 
 	if(en-st<2) {
-		x=matchlen(old+I[st],oldsize-I[st],new,newsize);
-		y=matchlen(old+I[en],oldsize-I[en],new,newsize);
+		x=matchlen(oldbytes+I[st],oldsize-I[st],newbytes,newsize);
+		y=matchlen(oldbytes+I[en],oldsize-I[en],newbytes,newsize);
 
 		if(x>y) {
 			*pos=I[st];
@@ -160,10 +161,10 @@ static int64_t search(const int64_t *I,const uint8_t *old,int64_t oldsize,
 	};
 
 	x=st+(en-st)/2;
-	if(memcmp(old+I[x],new,MIN(oldsize-I[x],newsize))<0) {
-		return search(I,old,oldsize,new,newsize,x,en,pos);
+	if(memcmp(oldbytes+I[x],newbytes,MIN(oldsize-I[x],newsize))<0) {
+		return search(I,oldbytes,oldsize,newbytes,newsize,x,en,pos);
 	} else {
-		return search(I,old,oldsize,new,newsize,st,x,pos);
+		return search(I,oldbytes,oldsize,newbytes,newsize,st,x,pos);
 	};
 }
 
@@ -208,32 +209,41 @@ static int64_t writedata(struct bsdiff_stream* stream, const void* buffer, int64
 
 struct bsdiff_request
 {
-	const uint8_t* old;
+	const uint8_t* oldbytes;
 	int64_t oldsize;
-	const uint8_t* new;
+	const uint8_t* newbytes;
 	int64_t newsize;
 	struct bsdiff_stream* stream;
 	int64_t *I;
 	uint8_t *buffer;
+	bool use_sais;
 };
 
 static int bsdiff_internal(const struct bsdiff_request req)
 {
-	int64_t *I,*V;
-	int64_t scan,pos,len;
-	int64_t lastscan,lastpos,lastoffset;
-	int64_t oldscore,scsc;
-	int64_t s,Sf,lenf,Sb,lenb;
-	int64_t overlap,Ss,lens;
+	int64_t* I;
+	int64_t scan, pos, len;
+	int64_t lastscan, lastpos, lastoffset;
+	int64_t oldscore, scsc;
+	int64_t s, Sf, lenf, Sb, lenb;
+	int64_t overlap, Ss, lens;
 	int64_t i;
-	uint8_t *buffer;
+	uint8_t* buffer;
 	uint8_t buf[8 * 3];
 
-	if((V=req.stream->malloc((req.oldsize+1)*sizeof(int64_t)))==NULL) return -1;
 	I = req.I;
 
-	qsufsort(I,V,req.old,req.oldsize);
-	req.stream->free(V);
+	if (req.use_sais)
+	{
+		sais64_u8(req.oldbytes, I, req.oldsize, 256);
+	}
+	else
+	{
+		int64_t* V;
+		if ((V = (int64_t*)req.stream->malloc((req.oldsize + 1) * sizeof(int64_t))) == NULL) return -1;
+		qsufsort(I, V, req.oldbytes, req.oldsize);
+		req.stream->free(V);
+	}
 
 	buffer = req.buffer;
 
@@ -244,26 +254,26 @@ static int bsdiff_internal(const struct bsdiff_request req)
 		oldscore=0;
 
 		for(scsc=scan+=len;scan<req.newsize;scan++) {
-			len=search(I,req.old,req.oldsize,req.new+scan,req.newsize-scan,
+			len=search(I,req.oldbytes,req.oldsize,req.newbytes+scan,req.newsize-scan,
 					0,req.oldsize,&pos);
 
 			for(;scsc<scan+len;scsc++)
 			if((scsc+lastoffset<req.oldsize) &&
-				(req.old[scsc+lastoffset] == req.new[scsc]))
+				(req.oldbytes[scsc+lastoffset] == req.newbytes[scsc]))
 				oldscore++;
 
 			if(((len==oldscore) && (len!=0)) || 
 				(len>oldscore+8)) break;
 
 			if((scan+lastoffset<req.oldsize) &&
-				(req.old[scan+lastoffset] == req.new[scan]))
+				(req.oldbytes[scan+lastoffset] == req.newbytes[scan]))
 				oldscore--;
 		};
 
 		if((len!=oldscore) || (scan==req.newsize)) {
 			s=0;Sf=0;lenf=0;
 			for(i=0;(lastscan+i<scan)&&(lastpos+i<req.oldsize);) {
-				if(req.old[lastpos+i]==req.new[lastscan+i]) s++;
+				if(req.oldbytes[lastpos+i]==req.newbytes[lastscan+i]) s++;
 				i++;
 				if(s*2-i>Sf*2-lenf) { Sf=s; lenf=i; };
 			};
@@ -272,7 +282,7 @@ static int bsdiff_internal(const struct bsdiff_request req)
 			if(scan<req.newsize) {
 				s=0;Sb=0;
 				for(i=1;(scan>=lastscan+i)&&(pos>=i);i++) {
-					if(req.old[pos-i]==req.new[scan-i]) s++;
+					if(req.oldbytes[pos-i]==req.newbytes[scan-i]) s++;
 					if(s*2-i>Sb*2-lenb) { Sb=s; lenb=i; };
 				};
 			};
@@ -281,10 +291,10 @@ static int bsdiff_internal(const struct bsdiff_request req)
 				overlap=(lastscan+lenf)-(scan-lenb);
 				s=0;Ss=0;lens=0;
 				for(i=0;i<overlap;i++) {
-					if(req.new[lastscan+lenf-overlap+i]==
-					   req.old[lastpos+lenf-overlap+i]) s++;
-					if(req.new[scan-lenb+i]==
-					   req.old[pos-lenb+i]) s--;
+					if(req.newbytes[lastscan+lenf-overlap+i]==
+					   req.oldbytes[lastpos+lenf-overlap+i]) s++;
+					if(req.newbytes[scan-lenb+i]==
+					   req.oldbytes[pos-lenb+i]) s--;
 					if(s>Ss) { Ss=s; lens=i+1; };
 				};
 
@@ -301,14 +311,19 @@ static int bsdiff_internal(const struct bsdiff_request req)
 				return -1;
 
 			/* Write diff data */
-			for(i=0;i<lenf;i++)
-				buffer[i]=req.new[lastscan+i]-req.old[lastpos+i];
+			int64_t nz = 0;
+			for (i = 0; i < lenf; i++)
+			{
+				buffer[i] = req.newbytes[lastscan + i] - req.oldbytes[lastpos + i];
+				if (buffer[i] == 0)
+					++nz;
+			}
 			if (writedata(req.stream, buffer, lenf))
 				return -1;
 
 			/* Write extra data */
 			for(i=0;i<(scan-lenb)-(lastscan+lenf);i++)
-				buffer[i]=req.new[lastscan+lenf+i];
+				buffer[i]=req.newbytes[lastscan+lenf+i];
 			if (writedata(req.stream, buffer, (scan-lenb)-(lastscan+lenf)))
 				return -1;
 
@@ -321,25 +336,26 @@ static int bsdiff_internal(const struct bsdiff_request req)
 	return 0;
 }
 
-int bsdiff(const uint8_t* old, int64_t oldsize, const uint8_t* new, int64_t newsize, struct bsdiff_stream* stream)
+int bsdiff(const uint8_t* oldbytes, int64_t oldsize, const uint8_t* newbytes, int64_t newsize, struct bsdiff_stream* stream, bool use_sais)
 {
 	int result;
 	struct bsdiff_request req;
 
-	if((req.I=stream->malloc((oldsize+1)*sizeof(int64_t)))==NULL)
+	if((req.I=(int64_t *)stream->malloc((oldsize+1)*sizeof(int64_t)))==NULL)
 		return -1;
 
-	if((req.buffer=stream->malloc(newsize+1))==NULL)
+	if((req.buffer=(uint8_t *)stream->malloc(newsize+1))==NULL)
 	{
 		stream->free(req.I);
 		return -1;
 	}
 
-	req.old = old;
+	req.oldbytes = oldbytes;
 	req.oldsize = oldsize;
-	req.new = new;
+	req.newbytes = newbytes;
 	req.newsize = newsize;
 	req.stream = stream;
+	req.use_sais = use_sais;
 
 	result = bsdiff_internal(req);
 
@@ -354,11 +370,130 @@ int bsdiff(const uint8_t* old, int64_t oldsize, const uint8_t* new, int64_t news
 #include <sys/types.h>
 
 #include <bzlib.h>
+#include <zstd.h>
+#ifndef _WIN32
 #include <err.h>
+#endif
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
+
+struct ZSTD_stream
+{
+	size_t buffInSize;
+	uint8_t* buffIn = nullptr;
+	size_t buffOutSize;
+	uint8_t* buffOut = nullptr;
+	size_t inUsed;
+	ZSTD_CCtx* cctx = nullptr;
+	FILE* outputfp;
+
+	void init(FILE *fp)
+	{
+		outputfp = fp;
+		buffInSize = ZSTD_CStreamInSize();
+		buffIn = (uint8_t *)malloc(buffInSize);
+		buffOutSize = ZSTD_CStreamOutSize();
+		buffOut = (uint8_t*)malloc(buffOutSize);
+		inUsed = 0;
+		cctx = ZSTD_createCCtx();
+
+		ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 9);
+		ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
+		ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, 1);
+	}
+
+	static int write(struct bsdiff_stream* stream, const void* buffer, int size)
+	{
+		return ((ZSTD_stream *)stream->opaque)->write_internal(buffer, size);
+	}
+	
+	int write_internal(const void* buffer, int size)
+	{
+		size_t left = size;
+		const uint8_t* ptr = (const uint8_t*)buffer;
+
+		while (left > 0)
+		{
+			size_t chunk = left;
+			if (chunk > buffInSize - inUsed)
+			{
+				chunk = buffInSize - inUsed;
+			}
+
+			memcpy(buffIn + inUsed, ptr, chunk);
+			inUsed += chunk;
+			left -= chunk;
+			ptr += chunk;
+			if (left == 0)
+				return 0;
+
+			ZSTD_inBuffer input = { buffIn, buffInSize, 0 };
+			do
+			{
+				ZSTD_outBuffer output = { buffOut, buffOutSize, 0 };
+				size_t const remaining = ZSTD_compressStream2(cctx, &output, &input, ZSTD_e_continue);
+				if (fwrite(buffOut, 1, output.pos, outputfp) != output.pos)
+				{
+					return -1;
+				}
+			} while (input.pos < input.size);
+
+			inUsed = 0;
+		}
+
+		return 0;
+	}
+
+	void flush()
+	{
+		ZSTD_inBuffer input = { buffIn, inUsed, 0 };
+		size_t remaining;
+		do
+		{
+			ZSTD_outBuffer output = { buffOut, buffOutSize, 0 };
+			remaining = ZSTD_compressStream2(cctx, &output, &input, ZSTD_e_end);
+			fwrite(buffOut, 1, output.pos, outputfp);
+		} while (remaining != 0);
+	}
+
+	~ZSTD_stream()
+	{
+		ZSTD_freeCCtx(cctx);
+		free(buffIn);
+		free(buffOut);
+	}
+};
+
+#ifdef _WIN32
+#include <stdarg.h>
+static void err(int eval, const char* fmt, ...)
+{
+	fprintf(stderr, "bsdiff: ");
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, ": %s\n", strerror(errno));
+	exit(eval);
+}
+
+static void errx(int eval, const char* fmt, ...)
+{
+	fprintf(stderr, "bsdiff: ");
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+	exit(eval);
+}
+#endif
 
 static int bz2_write(struct bsdiff_stream* stream, const void* buffer, int size)
 {
@@ -377,67 +512,117 @@ int main(int argc,char *argv[])
 {
 	int fd;
 	int bz2err;
-	uint8_t *old,*new;
+	uint8_t *oldbytes = NULL,*newbytes = NULL;
 	off_t oldsize,newsize;
 	uint8_t buf[8];
 	FILE * pf;
-	struct bsdiff_stream stream;
-	BZFILE* bz2;
 
-	memset(&bz2, 0, sizeof(bz2));
-	stream.malloc = malloc;
-	stream.free = free;
-	stream.write = bz2_write;
+	int i = 1;
+	bool use_zstd = false;
+	bool use_sais = false;
 
-	if(argc!=4) errx(1,"usage: %s oldfile newfile patchfile\n",argv[0]);
+	while (i < argc)
+	{
+		if (strcmp(argv[i], "-zstd") == 0)
+		{
+			use_zstd = true;
+			++i;
+		}
+		else if (strcmp(argv[i], "-sais") == 0)
+		{
+			use_sais = true;
+			++i;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	if (i + 3 != argc) errx(1, "usage: %s [ -zstd ] [-sais] oldfile newfile patchfile\n", argv[0]);
+
+	const char* oldfile = argv[i];
+	const char* newfile = argv[i + 1];
+	const char* patchfile = argv[i + 2];
 
 	/* Allocate oldsize+1 bytes instead of oldsize bytes to ensure
 		that we never try to malloc(0) and get a NULL pointer */
-	if(((fd=open(argv[1],O_RDONLY,0))<0) ||
+	if(((fd=open(oldfile,O_RDONLY|O_BINARY,0))<0) ||
 		((oldsize=lseek(fd,0,SEEK_END))==-1) ||
-		((old=malloc(oldsize+1))==NULL) ||
+		((oldbytes=(uint8_t *)malloc(oldsize+1))==NULL) ||
 		(lseek(fd,0,SEEK_SET)!=0) ||
-		(read(fd,old,oldsize)!=oldsize) ||
-		(close(fd)==-1)) err(1,"%s",argv[1]);
+		(read(fd,oldbytes,oldsize)!=oldsize) ||
+		(close(fd)==-1)) err(1,"loading %s",oldfile);
 
 
 	/* Allocate newsize+1 bytes instead of newsize bytes to ensure
 		that we never try to malloc(0) and get a NULL pointer */
-	if(((fd=open(argv[2],O_RDONLY,0))<0) ||
+	if(((fd=open(newfile,O_RDONLY|O_BINARY,0))<0) ||
 		((newsize=lseek(fd,0,SEEK_END))==-1) ||
-		((new=malloc(newsize+1))==NULL) ||
+		((newbytes=(uint8_t *)malloc(newsize+1))==NULL) ||
 		(lseek(fd,0,SEEK_SET)!=0) ||
-		(read(fd,new,newsize)!=newsize) ||
-		(close(fd)==-1)) err(1,"%s",argv[2]);
+		(read(fd,newbytes,newsize)!=newsize) ||
+		(close(fd)==-1)) err(1,"load %s",newfile);
 
 	/* Create the patch file */
-	if ((pf = fopen(argv[3], "w")) == NULL)
-		err(1, "%s", argv[3]);
+	if ((pf = fopen(patchfile, "wb")) == NULL)
+		err(1, "opening %s", patchfile);
 
 	/* Write header (signature+newsize)*/
 	offtout(newsize, buf);
-	if (fwrite("ENDSLEY/BSDIFF43", 16, 1, pf) != 1 ||
+
+	const char* head = "ENDSLEY/BSDIFF43";
+	if (use_zstd)
+	{
+		head = "ENDSLEY/BSDIFF4Z";
+	}
+	if (fwrite(head, 16, 1, pf) != 1 ||
 		fwrite(buf, sizeof(buf), 1, pf) != 1)
 		err(1, "Failed to write header");
 
 
-	if (NULL == (bz2 = BZ2_bzWriteOpen(&bz2err, pf, 9, 0, 0)))
-		errx(1, "BZ2_bzWriteOpen, bz2err=%d", bz2err);
+	struct bsdiff_stream stream;
+	memset(&stream, 0, sizeof(stream));
+	stream.malloc = malloc;
+	stream.free = free;
 
-	stream.opaque = bz2;
-	if (bsdiff(old, oldsize, new, newsize, &stream))
-		err(1, "bsdiff");
+	if (use_zstd)
+	{
+		stream.write = ZSTD_stream::write;
 
-	BZ2_bzWriteClose(&bz2err, bz2, 0, NULL, NULL);
-	if (bz2err != BZ_OK)
-		err(1, "BZ2_bzWriteClose, bz2err=%d", bz2err);
+		ZSTD_stream* zstd = new ZSTD_stream;
+		zstd->init(pf);
+		stream.opaque = zstd;
+
+		if (bsdiff(oldbytes, oldsize, newbytes, newsize, &stream, use_sais))
+			err(1, "bsdiff itself");
+
+		zstd->flush();
+		delete zstd;
+	}
+	else
+	{
+		stream.write = bz2_write;
+
+		BZFILE* bz2;
+		if (NULL == (bz2 = BZ2_bzWriteOpen(&bz2err, pf, 9, 0, 0)))
+			errx(1, "BZ2_bzWriteOpen, bz2err=%d", bz2err);
+
+		stream.opaque = bz2;
+		if (bsdiff(oldbytes, oldsize, newbytes, newsize, &stream, use_sais))
+			err(1, "bsdiff");
+
+		BZ2_bzWriteClose(&bz2err, bz2, 0, NULL, NULL);
+		if (bz2err != BZ_OK)
+			err(1, "BZ2_bzWriteClose, bz2err=%d", bz2err);
+	}
 
 	if (fclose(pf))
 		err(1, "fclose");
 
 	/* Free the memory we used */
-	free(old);
-	free(new);
+	free(oldbytes);
+	free(newbytes);
 
 	return 0;
 }
