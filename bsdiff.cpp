@@ -495,6 +495,50 @@ static void errx(int eval, const char* fmt, ...)
 }
 #endif
 
+#if _WIN32
+#include <time.h>
+#define EPOCHFILETIME (116444736000000000LL)
+
+struct timezone
+{
+	int tz_minuteswest; /* minutes W of Greenwich */
+	int tz_dsttime;     /* type of dst correction */
+};
+
+int gettimeofday(struct timeval* tv, struct timezone* tz)
+{
+	static bool      tzflag;
+
+	if (tv != nullptr)
+	{
+		FILETIME        ft;
+		LARGE_INTEGER   li;
+		GetSystemTimeAsFileTime(&ft);
+		li.LowPart = ft.dwLowDateTime;
+		li.HighPart = ft.dwHighDateTime;
+		int64_t t = li.QuadPart;       /* In 100-nanosecond intervals */
+		t -= EPOCHFILETIME;     /* Offset to the Epoch time */
+		t /= 10;                /* In microseconds */
+		tv->tv_sec = (long)(t / 1000000);
+		tv->tv_usec = (long)(t % 1000000);
+	}
+
+	if (tz != nullptr)
+	{
+		if (!tzflag)
+		{
+			_tzset();
+			tzflag = true;
+		}
+
+		tz->tz_minuteswest = _timezone / 60;
+		tz->tz_dsttime = _daylight;
+	}
+
+	return 0;
+}
+#endif
+
 static int bz2_write(struct bsdiff_stream* stream, const void* buffer, int size)
 {
 	int bz2err;
@@ -540,6 +584,9 @@ int main(int argc,char *argv[])
 	}
 
 	if (i + 3 != argc) errx(1, "usage: %s [ -zstd ] [-sais] oldfile newfile patchfile\n", argv[0]);
+
+	timeval start;
+	gettimeofday(&start, nullptr);
 
 	const char* oldfile = argv[i];
 	const char* newfile = argv[i + 1];
@@ -623,6 +670,19 @@ int main(int argc,char *argv[])
 	/* Free the memory we used */
 	free(oldbytes);
 	free(newbytes);
+
+	timeval end;
+	gettimeofday(&end, nullptr);
+
+	end.tv_sec -= start.tv_sec;
+	end.tv_usec -= start.tv_usec;
+	if (end.tv_usec < 0)
+	{
+		--end.tv_sec;
+		end.tv_usec += 1000000;
+	}
+
+	printf("took %d.%03d\n", end.tv_sec, end.tv_usec / 1000);
 
 	return 0;
 }
